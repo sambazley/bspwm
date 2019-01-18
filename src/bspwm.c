@@ -33,6 +33,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <string.h>
 #include <xcb/xinerama.h>
 #include "types.h"
 #include "desktop.h"
@@ -46,6 +47,8 @@
 #include "history.h"
 #include "ewmh.h"
 #include "rule.h"
+#include "restore.h"
+#include "query.h"
 #include "bspwm.h"
 
 int main(int argc, char *argv[])
@@ -53,16 +56,17 @@ int main(int argc, char *argv[])
 	fd_set descriptors;
 	char socket_path[MAXLEN];
 	config_path[0] = '\0';
+	char restore_path[MAXLEN] = {0};
 	int sock_fd, cli_fd, dpy_fd, max_fd, n;
 	struct sockaddr_un sock_address;
 	char msg[BUFSIZ] = {0};
 	xcb_generic_event_t *event;
 	int opt;
 
-	while ((opt = getopt(argc, argv, "hvc:")) != -1) {
+	while ((opt = getopt(argc, argv, "hvc:s:")) != -1) {
 		switch (opt) {
 			case 'h':
-				printf(WM_NAME " [-h|-v|-c CONFIG_PATH]\n");
+				printf(WM_NAME " [-h|-v|-c CONFIG_PATH|-s STATE_PATH]\n");
 				exit(EXIT_SUCCESS);
 				break;
 			case 'v':
@@ -71,6 +75,9 @@ int main(int argc, char *argv[])
 				break;
 			case 'c':
 				snprintf(config_path, sizeof(config_path), "%s", optarg);
+				break;
+			case 's':
+				snprintf(restore_path, sizeof(restore_path), "%s", optarg);
 				break;
 		}
 	}
@@ -92,6 +99,10 @@ int main(int argc, char *argv[])
 
 	load_settings();
 	setup();
+
+	if (restore_path[0] != '\0') {
+		restore_tree(restore_path);
+	}
 
 	dpy_fd = xcb_get_file_descriptor(dpy);
 
@@ -193,6 +204,25 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	char restart_state_path[MAXLEN];
+	char *rsp = getenv(RESTART_STATE_ENV_VAR);
+	if (rsp != NULL) {
+		snprintf(restart_state_path, sizeof(restart_state_path), "%s", rsp);
+	} else {
+		char *host = NULL;
+		int dn = 0, sn = 0;
+		if (xcb_parse_display(NULL, &host, &dn, &sn) != 0) {
+			snprintf(restart_state_path, sizeof(restart_state_path), RESTART_STATE_PATH_TPL, host, dn, sn);
+		}
+		free(host);
+	}
+
+	if (restart) {
+		FILE *f = fopen(restart_state_path, "w");
+		query_tree(f);
+		fclose(f);
+	}
+
 	cleanup();
 	close(sock_fd);
 	unlink(socket_path);
@@ -205,7 +235,24 @@ int main(int argc, char *argv[])
 	xcb_disconnect(dpy);
 
 	if (restart) {
-		execvp(*argv, argv + 1);
+		char **rargv = malloc(sizeof(char *) * (argc + 3));
+
+		int rargc = 0;
+		for (int i = 0; i < argc; i++) {
+			if (streq("-s", argv[i])) {
+			    i++;
+			    continue;
+			}
+			rargv[rargc++] = argv[i];
+		}
+
+		rargv[rargc] = "-s";
+		rargv[rargc + 1] = restart_state_path;
+		rargv[rargc + 2] = 0;
+
+		execvp(*argv, rargv);
+
+		free(rargv);
 	}
 
 	return exit_status;
